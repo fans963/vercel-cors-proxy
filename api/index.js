@@ -5,41 +5,70 @@ import * as https from "node:https";
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-const CORS_HEADERS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET,POST,OPTIONS",
-  "access-control-allow-headers": "content-type, authorization, accept",
-  "access-control-max-age": "86400",
-};
+const DEFAULT_CORS_ALLOW_HEADERS = "content-type, authorization, accept";
+const CORS_ALLOW_ORIGINS = (process.env.CORS_ALLOW_ORIGINS || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const DEFAULT_LOGIN_BASE_URL = "http://202.119.81.112:8080";
 const DEFAULT_TARGET_URL =
   "http://202.119.81.112:9080/njlgdx/xskb/xskb_list.do?Ves632DSdyV=NEW_XSD_PYGL";
 
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 12000);
+
+function getAllowedOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) {
+    return "*";
+  }
+  if (CORS_ALLOW_ORIGINS.includes("*")) {
+    return "*";
+  }
+  return CORS_ALLOW_ORIGINS.includes(origin) ? origin : "null";
+}
+
+function setCorsHeaders(res, req = null) {
+  const allowOrigin = req ? getAllowedOrigin(req) : "*";
+  const requestHeaders = req?.headers["access-control-request-headers"];
+
+  res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+  res.setHeader("Vary", "Origin, Access-Control-Request-Headers");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    requestHeaders || DEFAULT_CORS_ALLOW_HEADERS,
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+function sendJson(res, req, status, payload) {
+  setCorsHeaders(res, req);
+  res.status(status).json(payload);
+}
+
 app.use((req, res, next) => {
+  setCorsHeaders(res, req);
   if (req.method === "OPTIONS") {
-    setCorsHeaders(res);
+    res.setHeader("Content-Length", "0");
     res.status(204).end();
     return;
   }
   next();
 });
 
-app.get("/", (_, res) => {
-  setCorsHeaders(res);
+app.get("/", (req, res) => {
   res.json({ ok: true, service: "schedule-fetcher", endpoints: ["/api/session/start", "/api/session/submit"] });
 });
 
 app.post("/api/session/start", async (req, res) => {
-  setCorsHeaders(res);
-
   const loginBaseUrl = req.body?.loginBaseUrl || DEFAULT_LOGIN_BASE_URL;
   let loginBase;
   try {
     loginBase = new URL(loginBaseUrl);
     validateTarget(loginBase);
   } catch (e) {
-    res.status(400).json({ error: "invalid loginBaseUrl", details: String(e) });
+    sendJson(res, req, 400, { error: "invalid loginBaseUrl", details: String(e) });
     return;
   }
 
@@ -82,14 +111,14 @@ app.post("/api/session/start", async (req, res) => {
       } session8080=${mask(session.jsession8080)}`,
     );
 
-    res.json({
+    sendJson(res, req, 200, {
       session,
       captchaBase64: captchaRes.body.toString("base64"),
       captchaContentType: captchaRes.headers["content-type"] || "",
       networkLogs: logs,
     });
   } catch (e) {
-    res.status(502).json({
+    sendJson(res, req, 502, {
       error: "start_failed",
       details: String(e),
       networkLogs: logs,
@@ -98,8 +127,6 @@ app.post("/api/session/start", async (req, res) => {
 });
 
 app.post("/api/session/submit", async (req, res) => {
-  setCorsHeaders(res);
-
   const loginBaseUrl = req.body?.loginBaseUrl || DEFAULT_LOGIN_BASE_URL;
   const targetUrl = req.body?.targetUrl || DEFAULT_TARGET_URL;
   const username = req.body?.username || "";
@@ -107,7 +134,7 @@ app.post("/api/session/submit", async (req, res) => {
   const verifyCode = req.body?.verifyCode || "";
 
   if (!username || !password || !verifyCode) {
-    res.status(400).json({ error: "username/password/verifyCode required" });
+    sendJson(res, req, 400, { error: "username/password/verifyCode required" });
     return;
   }
 
@@ -122,7 +149,7 @@ app.post("/api/session/submit", async (req, res) => {
     validateTarget(loginBase);
     validateTarget(target);
   } catch (e) {
-    res.status(400).json({ error: "invalid url", details: String(e) });
+    sendJson(res, req, 400, { error: "invalid url", details: String(e) });
     return;
   }
 
@@ -187,7 +214,7 @@ app.post("/api/session/submit", async (req, res) => {
       )}`,
     );
 
-    res.json({
+    sendJson(res, req, 200, {
       html: decodeBody(targetRes.body, targetRes.headers["content-type"]),
       networkLogs: logs,
       session,
@@ -195,7 +222,7 @@ app.post("/api/session/submit", async (req, res) => {
       targetContentType: targetRes.headers["content-type"] || "",
     });
   } catch (e) {
-    res.status(502).json({
+    sendJson(res, req, 502, {
       error: "submit_failed",
       details: String(e),
       networkLogs: logs,
@@ -203,12 +230,6 @@ app.post("/api/session/submit", async (req, res) => {
     });
   }
 });
-
-function setCorsHeaders(res) {
-  for (const [k, v] of Object.entries(CORS_HEADERS)) {
-    res.setHeader(k, v);
-  }
-}
 
 function normalizeSession(raw) {
   return {
@@ -301,6 +322,10 @@ function upstreamRequest(
       res.on("error", reject);
     });
 
+    req.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+      req.destroy(new Error(`upstream_timeout_${UPSTREAM_TIMEOUT_MS}ms`));
+    });
+
     req.on("error", reject);
     if (body && body.length > 0) {
       req.write(body);
@@ -353,5 +378,12 @@ function mask(value) {
   if (value.length <= 8) return "***";
   return `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
+
+app.use((err, req, res, _next) => {
+  sendJson(res, req, 500, {
+    error: "internal_error",
+    details: String(err),
+  });
+});
 
 export default app;
