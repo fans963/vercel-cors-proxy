@@ -11,6 +11,15 @@ app.all('/', async (req, res) => {
         return;
     }
 
+    if (req.method === 'OPTIONS') {
+        const origin = req.headers.origin || '*';
+        res.setHeader('access-control-allow-origin', origin);
+        res.setHeader('access-control-allow-credentials', 'true');
+        res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
+        res.setHeader('access-control-allow-headers', req.headers['access-control-request-headers'] || '*');
+        return res.status(200).end();
+    }
+
     const targetReqUrl = targetParams.url;
     const targetReqHandler = (targetRes) => {
         console.log(`[Proxy] Response Status from Backend: ${targetRes.statusCode}`);
