@@ -269,13 +269,14 @@ app.all('/', async (req, res) => {
     }
 
     logs.push(`[PROXY] ${method} ${targetReqUrl.toString()}`);
+    logs.push(`[PROXY] cookie=${headers['cookie'] || 'none'} x-proxy-cookie=${req.headers['x-proxy-cookie'] || 'none'}`);
 
     try {
         const response = await fetch(targetReqUrl.toString(), {
             method,
             headers,
             body: (method !== 'GET' && method !== 'HEAD') ? req.body : undefined,
-            redirect: 'manual'
+            redirect: 'follow'
         });
 
         logs.push(`[UPSTREAM] status=${response.status}`);
