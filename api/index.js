@@ -170,6 +170,8 @@ app.post('/api/session/submit', async (req, res) => {
   try {
     const logonUrl = new URL("/Logon.do?method=logon", loginBase);
     const form = new URLSearchParams({ USERNAME: username, PASSWORD: password, useDogCode: "", RANDOMCODE: verifyCode }).toString();
+    logs.push(`[DEBUG] logonUrl=${logonUrl.toString()}`);
+    logs.push(`[DEBUG] session_before_login: 8080=${currentSession.jsession8080} 9080=${currentSession.jsession9080}`);
 
     let postRes = await upstreamRequest(logonUrl, {
       method: "POST",
@@ -178,8 +180,15 @@ app.post('/api/session/submit', async (req, res) => {
       contentType: "application/x-www-form-urlencoded",
       body: form
     });
+    logs.push(`[SUBMIT] POST status=${postRes.statusCode} location=${postRes.location || 'none'} set-cookie=${JSON.stringify(postRes.setCookieList)}`);
     updateSessionFromSetCookie(currentSession, logonUrl, postRes.setCookieList);
-    logs.push(`[SUBMIT] POST logon status=${postRes.statusCode}`);
+    logs.push(`[DEBUG] session_after_post: 8080=${currentSession.jsession8080} 9080=${currentSession.jsession9080}`);
+
+    // Check the POST response body for error messages (e.g., wrong captcha)
+    const postBody = decodeBody(postRes.bytes, postRes.contentType);
+    if (postBody && postBody.length < 2000 && postBody.length > 0) {
+      logs.push(`[SUBMIT] POST body(${postBody.length}): ${postBody.substring(0, 300)}`);
+    }
 
     let currentUrl = logonUrl;
     let redirects = 0;
@@ -187,25 +196,39 @@ app.post('/api/session/submit', async (req, res) => {
       const location = postRes.location;
       if (!location) break;
       const nextUrl = normalizeRoutedUrl(new URL(location, currentUrl));
+      const nextPort = getEffectivePort(nextUrl);
+      logs.push(`[REDIRECT] ${redirects+1}: ${nextUrl.toString()} (port=${nextPort})`);
       postRes = await upstreamRequest(nextUrl, { method: "GET", session: currentSession, referer: `${loginBase.origin}/` });
+      logs.push(`[REDIRECT] ${redirects+1} result: status=${postRes.statusCode} set-cookie=${JSON.stringify(postRes.setCookieList)}`);
       updateSessionFromSetCookie(currentSession, nextUrl, postRes.setCookieList);
+      logs.push(`[DEBUG] session_after_redirect_${redirects+1}: 8080=${currentSession.jsession8080} 9080=${currentSession.jsession9080}`);
       currentUrl = nextUrl;
       redirects += 1;
     }
 
+    // After following redirects, log the final page content snippet
+    const redirectBody = decodeBody(postRes.bytes, postRes.contentType);
+    if (redirectBody) {
+      logs.push(`[AFTER_LOGIN] final status=${postRes.statusCode} url=${currentUrl.toString()} bodyLen=${redirectBody.length}`);
+      logs.push(`[AFTER_LOGIN] snippet: ${redirectBody.substring(0, 300)}`);
+    }
+
     // Use the original target URL as-is — it already specifies the correct port.
-    // The session cookies for both 8080 and 9080 are tracked independently.
     const targetFetchUrl = target;
+    logs.push(`[TARGET] fetching ${targetFetchUrl.toString()} cookie8080=${currentSession.jsession8080} cookie9080=${currentSession.jsession9080}`);
 
     const targetRes = await upstreamRequest(targetFetchUrl, { method: "GET", session: currentSession, referer: currentUrl.toString() });
+    const targetBody = decodeBody(targetRes.bytes, targetRes.contentType);
+    logs.push(`[TARGET] status=${targetRes.statusCode} bodyLen=${targetBody?.length || 0} snippet=${(targetBody || '').substring(0, 200)}`);
 
     res.json({
-      html: Buffer.from(targetRes.bytes).toString('base64'), // Send as B64 to preserve GBK bytes for Rust
+      html: Buffer.from(targetRes.bytes).toString('base64'),
       networkLogs: logs,
       session: currentSession,
       statusCode: targetRes.statusCode
     });
   } catch (e) {
+    logs.push(`[ERROR] ${e.message}`);
     res.status(502).json({ error: "submit_failed", details: String(e), networkLogs: logs });
   }
 });
