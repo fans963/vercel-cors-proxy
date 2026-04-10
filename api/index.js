@@ -193,10 +193,9 @@ app.post('/api/session/submit', async (req, res) => {
       redirects += 1;
     }
 
-    // Map to 9080 if needed
-    const targetFetchUrl = getEffectivePort(currentUrl) === "9080" 
-        ? normalizeRoutedUrl(new URL(`${target.pathname}${target.search}`, currentUrl)) 
-        : target;
+    // Use the original target URL as-is — it already specifies the correct port.
+    // The session cookies for both 8080 and 9080 are tracked independently.
+    const targetFetchUrl = target;
 
     const targetRes = await upstreamRequest(targetFetchUrl, { method: "GET", session: currentSession, referer: currentUrl.toString() });
 
