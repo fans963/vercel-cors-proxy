@@ -230,9 +230,19 @@ app.all('/', async (req, res) => {
     });
 
     res.status(response.status);
-    response.headers.forEach((v, k) => res.setHeader(k, v));
+
+    // Filter headers: Node's fetch automatically decompresses the body,
+    // so we must strip encoding/length headers to prevent browser decode errors.
+    const skipHeaders = ['content-encoding', 'content-length', 'transfer-encoding'];
+    response.headers.forEach((v, k) => {
+        if (!skipHeaders.includes(k.toLowerCase())) {
+            res.setHeader(k, v);
+        }
+    });
+
     const body = await response.arrayBuffer();
     res.send(Buffer.from(body));
 });
+
 
 export default app;
