@@ -15,7 +15,19 @@ app.all('/', async (req, res) => {
     const targetReqHandler = (targetRes) => {
         res.status(targetRes.statusCode)
 
-        res.setHeaders(new Map(Object.entries(targetRes.headersDistinct)));
+        const headersMap = new Map(Object.entries(targetRes.headersDistinct));
+        
+        // Rewrite Set-Cookie to remove Path/Domain restrictions
+        if (headersMap.has('set-cookie')) {
+            const cookies = headersMap.get('set-cookie').map(cookie => {
+                return cookie
+                    .replace(/Path=[^;]+/i, 'Path=/')
+                    .replace(/Domain=[^;]+/i, '');
+            });
+            headersMap.set('set-cookie', cookies);
+        }
+
+        res.setHeaders(headersMap);
         // set CORS headers
         const origin = req.headers.origin || '*';
         res.setHeader('access-control-allow-origin', origin);
