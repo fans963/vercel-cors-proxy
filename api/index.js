@@ -32,14 +32,21 @@ app.all('/', async (req, res) => {
         const setCookieHeaders = targetRes.headersDistinct['set-cookie'];
         if (setCookieHeaders && setCookieHeaders.length > 0) {
             console.log(`[Proxy] Outgoing Set-Cookie from Backend:`, setCookieHeaders);
+            const portSuffix = targetReqUrl.port ? `_${targetReqUrl.port}` : '';
             const rewrittenCookies = setCookieHeaders.map(cookie => {
-                return cookie
+                let rewritten = cookie
                     .replace(/Path=[^;]+/i, 'Path=/')
                     .replace(/Domain=[^;]+/i, '')
                     .replace(/SameSite=[^;]+/i, '')
                     .replace(/Secure/i, '')
-                    .replace(/;?\s*$/, '') // Remove trailing semicolon/whitespace
-                    + '; SameSite=None; Secure';
+                    .replace(/;?\s*$/, ''); // Remove trailing semicolon/whitespace
+                
+                // Isolation: Rename JSESSIONID to include port if present
+                if (portSuffix) {
+                    rewritten = rewritten.replace(/JSESSIONID=/i, `JSESSIONID${portSuffix}=`);
+                }
+                
+                return rewritten + '; SameSite=None; Secure';
             });
             headersMap.set('set-cookie', rewrittenCookies);
         }
@@ -97,8 +104,19 @@ app.all('/', async (req, res) => {
         
         // Join multi-value headers with semicolon for cookies, or comma for others
         if (name === 'cookie') {
-            const joinedCookies = values.join('; ');
-            console.log(`[Proxy] Forwarding Cookies:`, joinedCookies);
+            const portSuffix = targetReqUrl.port ? `_${targetReqUrl.port}` : '';
+            let joinedCookies = values.join('; ');
+            
+            // Isolation: Restore JSESSIONID from port-suffixed version
+            if (portSuffix && joinedCookies.includes(`JSESSIONID${portSuffix}`)) {
+                const regex = new RegExp(`JSESSIONID${portSuffix}=([^;]+)`, 'i');
+                const match = joinedCookies.match(regex);
+                if (match) {
+                    joinedCookies = `JSESSIONID=${match[1]}; ${joinedCookies}`;
+                }
+            }
+            
+            console.log(`[Proxy] Forwarding Cookies to Port ${targetReqUrl.port || '80'}:`, joinedCookies);
             headers.set(name, joinedCookies);
         } else {
             headers.set(name, values.join(', '));
