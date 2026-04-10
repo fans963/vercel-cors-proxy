@@ -206,27 +206,41 @@ app.post('/api/session/submit', async (req, res) => {
       redirects += 1;
     }
 
-    // After following redirects, log the final page content snippet
+    // After following redirects, check if the final page is already the success page.
+    // The login redirect chain ends on 9080/njlgdx/framework/main.jsp which shows "学生个人中心".
+    // Fetching 8080/main.jsp separately ALWAYS fails because the 8080 session is invalidated after login.
     const redirectBody = decodeBody(postRes.bytes, postRes.contentType);
+    logs.push(`[AFTER_LOGIN] final status=${postRes.statusCode} url=${currentUrl.toString()} bodyLen=${redirectBody?.length || 0}`);
     if (redirectBody) {
-      logs.push(`[AFTER_LOGIN] final status=${postRes.statusCode} url=${currentUrl.toString()} bodyLen=${redirectBody.length}`);
       logs.push(`[AFTER_LOGIN] snippet: ${redirectBody.substring(0, 300)}`);
     }
 
-    // Use the original target URL as-is — it already specifies the correct port.
-    const targetFetchUrl = target;
-    logs.push(`[TARGET] fetching ${targetFetchUrl.toString()} cookie8080=${currentSession.jsession8080} cookie9080=${currentSession.jsession9080}`);
-
-    const targetRes = await upstreamRequest(targetFetchUrl, { method: "GET", session: currentSession, referer: currentUrl.toString() });
-    const targetBody = decodeBody(targetRes.bytes, targetRes.contentType);
-    logs.push(`[TARGET] status=${targetRes.statusCode} bodyLen=${targetBody?.length || 0} snippet=${(targetBody || '').substring(0, 200)}`);
-
-    res.json({
-      html: Buffer.from(targetRes.bytes).toString('base64'),
-      networkLogs: logs,
-      session: currentSession,
-      statusCode: targetRes.statusCode
-    });
+    // If the redirect chain already landed on a success page, return it directly.
+    // Otherwise, try fetching the target URL.
+    const isLoginSuccess = redirectBody && (redirectBody.includes("个人中心") || redirectBody.includes("理论课表"));
+    
+    if (isLoginSuccess) {
+      logs.push(`[RESULT] Login success detected from redirect chain, returning redirect page directly`);
+      res.json({
+        html: Buffer.from(postRes.bytes).toString('base64'),
+        networkLogs: logs,
+        session: currentSession,
+        statusCode: postRes.statusCode
+      });
+    } else {
+      // Fallback: try the target URL (for non-redirect login flows)
+      const targetFetchUrl = target;
+      logs.push(`[TARGET] fetching ${targetFetchUrl.toString()} cookie8080=${currentSession.jsession8080} cookie9080=${currentSession.jsession9080}`);
+      const targetRes = await upstreamRequest(targetFetchUrl, { method: "GET", session: currentSession, referer: currentUrl.toString() });
+      const targetBody = decodeBody(targetRes.bytes, targetRes.contentType);
+      logs.push(`[TARGET] status=${targetRes.statusCode} bodyLen=${targetBody?.length || 0} snippet=${(targetBody || '').substring(0, 200)}`);
+      res.json({
+        html: Buffer.from(targetRes.bytes).toString('base64'),
+        networkLogs: logs,
+        session: currentSession,
+        statusCode: targetRes.statusCode
+      });
+    }
   } catch (e) {
     logs.push(`[ERROR] ${e.message}`);
     res.status(502).json({ error: "submit_failed", details: String(e), networkLogs: logs });
