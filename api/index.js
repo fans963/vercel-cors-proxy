@@ -13,6 +13,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
+    res.setHeader('Access-Control-Expose-Headers', 'X-Proxy-Logs, Content-Type, Set-Cookie');
     
     if (req.method === 'OPTIONS') {
         return res.status(204).end();
@@ -212,36 +213,60 @@ app.post('/api/session/submit', async (req, res) => {
 
 // --- Legacy Universal Proxy ---
 app.all('/', async (req, res) => {
-    // Treat everything right to url= as target
+    const logs = [];
     const urlMatch = req.url.match(/(?<=[?&])url=(?<url>.*)$/);
     if (!urlMatch) return res.status(400).send("query parameter 'url' is required");
     const targetReqUrl = new URL(decodeURIComponent(urlMatch.groups.url));
 
-    const response = await fetch(targetReqUrl.toString(), {
-        method: req.method,
-        headers: {
-            ...req.headers,
-            host: targetReqUrl.host,
-            origin: targetReqUrl.origin,
-            referer: req.headers['x-alt-referer'] || req.headers.referer
-        },
-        body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined,
-        redirect: 'manual'
-    });
+    const method = req.method;
+    const headers = {
+        ...req.headers,
+        host: targetReqUrl.host,
+        origin: targetReqUrl.origin,
+        // Browser sets 'referer' to localhost, we allow manual override via X-Proxy-Referer
+        referer: req.headers['x-proxy-referer'] || req.headers['x-alt-referer'] || req.headers.referer || targetReqUrl.origin
+    };
 
-    res.status(response.status);
+    // If browser blocks 'Cookie' header, we can use 'X-Proxy-Cookie' as a bypass
+    if (req.headers['x-proxy-cookie']) {
+        headers['cookie'] = req.headers['x-proxy-cookie'];
+    }
 
-    // Filter headers: Node's fetch automatically decompresses the body,
-    // so we must strip encoding/length headers to prevent browser decode errors.
-    const skipHeaders = ['content-encoding', 'content-length', 'transfer-encoding'];
-    response.headers.forEach((v, k) => {
-        if (!skipHeaders.includes(k.toLowerCase())) {
-            res.setHeader(k, v);
+    logs.push(`[PROXY] ${method} ${targetReqUrl.toString()}`);
+
+    try {
+        const response = await fetch(targetReqUrl.toString(), {
+            method,
+            headers,
+            body: (method !== 'GET' && method !== 'HEAD') ? req.body : undefined,
+            redirect: 'manual'
+        });
+
+        logs.push(`[UPSTREAM] status=${response.status}`);
+        if (response.headers.get('location')) {
+            logs.push(`[REDIRECT] -> ${response.headers.get('location')}`);
         }
-    });
 
-    const body = await response.arrayBuffer();
-    res.send(Buffer.from(body));
+        res.status(response.status);
+
+        // Filter headers: Node's fetch automatically decompresses the body
+        const skipHeaders = ['content-encoding', 'content-length', 'transfer-encoding'];
+        response.headers.forEach((v, k) => {
+            if (!skipHeaders.includes(k.toLowerCase())) {
+                res.setHeader(k, v);
+            }
+        });
+
+        // Attach logs to the response header
+        res.setHeader('X-Proxy-Logs', Buffer.from(JSON.stringify(logs)).toString('base64'));
+
+        const body = await response.arrayBuffer();
+        res.send(Buffer.from(body));
+    } catch (err) {
+        logs.push(`[ERROR] ${err.message}`);
+        res.setHeader('X-Proxy-Logs', Buffer.from(JSON.stringify(logs)).toString('base64'));
+        res.status(502).send(err.message);
+    }
 });
 
 
