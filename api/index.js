@@ -3,279 +3,236 @@ import * as http from "node:http";
 import * as https from "node:https";
 
 const app = express();
-app.use(express.json()); // support json bodies for APIs
-app.use(express.raw({ type: '*/*', limit: '1mb' })); // ensure body is a buffer for proxy
+app.use(express.json());
+app.use(express.raw({ type: '*/*', limit: '1mb' }));
 
 // Global CORS Middleware
 app.use((req, res, next) => {
     const origin = req.headers.origin || '*';
-    res.setHeader('access-control-allow-origin', origin);
-    res.setHeader('access-control-allow-credentials', 'true');
-    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('access-control-allow-headers', req.headers['access-control-request-headers'] || '*');
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
     
     if (req.method === 'OPTIONS') {
-        return res.status(200).end();
+        return res.status(204).end();
     }
     next();
 });
 
-// --- Server-Side Orchestration APIs ---
+// --- Constants and Sharding Logic ---
+const DEFAULT_LOGIN_BASE_URL = "http://202.119.81.112:8080";
+const DEFAULT_TARGET_URL = "http://202.119.81.112:9080/njlgdx/xskb/xskb_list.do?Ves632DSdyV=NEW_XSD_PYGL";
+const ALLOWED_UPSTREAM_HOSTS = ["202.119.81.112", "202.119.81.113", "api1.fans963blog.asia", "api2.fans963blog.asia"];
 
-const PORTAL_ROOT = "http://202.119.81.112:8080";
-const DATA_ROOT = "http://202.119.81.112:9080/njlgdx";
+// --- Logic Helpers ---
 
-// Helper for server-side requests
-async function internalRequest(url, options = {}) {
-    return new Promise((resolve, reject) => {
-        const u = new URL(url);
-        const mod = u.protocol === 'https:' ? https : http;
-        const req = mod.request(u, options, (res) => {
-            const chunks = [];
-            res.on('data', (c) => chunks.push(c));
-            res.on('end', () => {
-                resolve({
-                    statusCode: res.statusCode,
-                    headers: res.headers,
-                    body: Buffer.concat(chunks)
-                });
-            });
-        });
-        req.on('error', reject);
-        if (options.body) req.write(options.body);
-        req.end();
-    });
+function updateSessionFromSetCookie(session, targetUrl, setCookieList) {
+  if (!setCookieList || setCookieList.length === 0) return;
+  const jsession = extractJsessionId(setCookieList);
+  if (!jsession) return;
+
+  const port = getEffectivePort(targetUrl);
+  if (port === "8080" || port === "80" || port === "443") {
+    session.jsession8080 = jsession;
+  } else if (port === "9080") {
+    session.jsession9080 = jsession;
+  }
 }
 
-// 1. Captcha API: Fetches captcha and the initial JSESSIONID
-app.get('/api/captcha', async (req, res) => {
-    try {
-        console.log(`[API] Fetching Captcha from ${PORTAL_ROOT}`);
-        // Init session
-        const init = await internalRequest(`${PORTAL_ROOT}/Logon.do?method=logonurl`);
-        const sessionCookie = init.headers['set-cookie'] ? init.headers['set-cookie'][0].split(';')[0] : '';
+function extractJsessionId(setCookieList) {
+  for (const item of setCookieList) {
+    const m = String(item).match(/(?:^|\s|;)JSESSIONID=([^;,\s]+)/i);
+    if (m && m[1]) return m[1].trim();
+  }
+  return "";
+}
 
-        // Get captcha
-        const captcha = await internalRequest(`${PORTAL_ROOT}/verifycode.servlet`, {
-            headers: { 'Cookie': sessionCookie }
-        });
+function getEffectivePort(targetUrl) {
+  return targetUrl.port || (targetUrl.protocol === "https:" ? "443" : "80");
+}
 
-        res.json({
-            image: captcha.body.toString('base64'),
-            cookie: sessionCookie
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+function buildSessionCookieHeader(session, targetUrl) {
+  const port = getEffectivePort(targetUrl);
+  const cookie =
+    port === "9080"
+      ? (session.jsession9080 || session.jsession8080)
+      : (port === "8080" || port === "80" || port === "443")
+        ? session.jsession8080
+        : "";
+  return cookie ? `JSESSIONID=${cookie}` : "";
+}
+
+function normalizeRoutedUrl(url) {
+  // Vercel reaches raw IPs directly, no need for mandatory sharding
+  return url;
+}
+
+function normalizeUrlWithDefaultPort(rawUrl, defaultPort) {
+  const parsed = new URL(String(rawUrl || ""));
+  if (!parsed.port) parsed.port = defaultPort;
+  return parsed;
+}
+
+async function upstreamRequest(url, { method = "GET", session, referer = "", isCaptcha = false, contentType = "", body = null } = {}) {
+  const headers = {
+    "Accept": "*/*",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept-Encoding": "identity",
+  };
+
+  const cookieStr = buildSessionCookieHeader(session, url);
+  if (cookieStr) headers["Cookie"] = cookieStr;
+  if (referer) headers["Referer"] = referer;
+  if (contentType) headers["Content-Type"] = contentType;
+  if (isCaptcha) {
+    headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8";
+    headers["Cache-Control"] = "no-cache";
+  }
+
+  const response = await fetch(url.toString(), {
+    method,
+    headers,
+    body: body || undefined,
+    redirect: "manual",
+  });
+
+  const arrayBuffer = await response.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+
+  return {
+    statusCode: response.status,
+    bytes,
+    location: response.headers.get("Location") || "",
+    contentType: response.headers.get("Content-Type") || "",
+    setCookieList: response.headers.getSetCookie ? response.headers.getSetCookie() : (response.headers.get("set-cookie") ? [response.headers.get("set-cookie")] : []),
+  };
+}
+
+async function upstreamRequestWithRedirects(initialUrl, requestOptions = {}, maxRedirects = 5) {
+  let currentUrl = initialUrl;
+  let redirects = 0;
+  let response = await upstreamRequest(currentUrl, requestOptions);
+  updateSessionFromSetCookie(requestOptions.session, currentUrl, response.setCookieList);
+
+  while ([301, 302, 303, 307, 308].includes(response.statusCode) && redirects < maxRedirects) {
+    const location = response.location;
+    if (!location) break;
+
+    const nextUrl = normalizeRoutedUrl(new URL(location, currentUrl));
+    response = await upstreamRequest(nextUrl, { ...requestOptions, method: "GET", body: null, contentType: "" });
+    updateSessionFromSetCookie(requestOptions.session, nextUrl, response.setCookieList);
+    currentUrl = nextUrl;
+    redirects += 1;
+  }
+  return { response, finalUrl: currentUrl, redirects };
+}
+
+function decodeBody(bytes, contentType = "") {
+  return new TextDecoder("utf-8").decode(bytes); // Simple decode, Rust handles GBK better
+}
+
+// --- Endpoints ---
+
+app.post('/api/session/start', async (req, res) => {
+  const body = req.body;
+  const loginBase = normalizeUrlWithDefaultPort(body?.loginBaseUrl || DEFAULT_LOGIN_BASE_URL, "8080");
+  const session = { jsession8080: "", jsession9080: "" };
+  const logs = [];
+
+  try {
+    const homeUrl = new URL("/", loginBase);
+    const homeResult = await upstreamRequestWithRedirects(homeUrl, { method: "GET", session, referer: `${loginBase.origin}/` });
+    logs.push(`[START] GET / status=${homeResult.response.statusCode} url=${homeResult.finalUrl.toString()}`);
+
+    const captchaUrl = new URL(`/verifycode.servlet?t=${Date.now()}`, loginBase);
+    const captchaResult = await upstreamRequestWithRedirects(captchaUrl, { method: "GET", session, referer: `${loginBase.origin}/`, isCaptcha: true });
+    
+    res.json({
+      session,
+      captchaBase64: Buffer.from(captchaResult.response.bytes).toString('base64'),
+      captchaContentType: captchaResult.response.contentType,
+      networkLogs: logs
+    });
+  } catch (e) {
+    res.status(502).json({ error: "start_failed", details: String(e), networkLogs: logs });
+  }
 });
 
-// 2. Timetable API: Handles full Login -> Fetch flow on the server
-app.post('/api/timetable', async (req, res) => {
-    try {
-        const { username, password, captcha, cookie } = req.body;
-        console.log(`[API] Orchestrating login for ${username}`);
+app.post('/api/session/submit', async (req, res) => {
+  const { username, password, verifyCode, session, loginBaseUrl, targetUrl } = req.body;
+  const loginBase = normalizeUrlWithDefaultPort(loginBaseUrl || DEFAULT_LOGIN_BASE_URL, "8080");
+  const target = normalizeUrlWithDefaultPort(targetUrl || DEFAULT_TARGET_URL, "9080");
+  const currentSession = session || { jsession8080: "", jsession9080: "" };
+  const logs = [];
 
-        // Step 1: Login POST
-        const body = new URLSearchParams({
-            USERNAME: username,
-            PASSWORD: password,
-            useDogCode: '',
-            RANDOMCODE: captcha,
-            encoded: ''
-        }).toString();
+  try {
+    const logonUrl = new URL("/Logon.do?method=logon", loginBase);
+    const form = new URLSearchParams({ USERNAME: username, PASSWORD: password, useDogCode: "", RANDOMCODE: verifyCode }).toString();
 
-        const login = await internalRequest(`${PORTAL_ROOT}/Logon.do?method=logon`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': cookie,
-                'Referer': `${PORTAL_ROOT}/Logon.do?method=logonurl`,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            body: body
-        });
+    let postRes = await upstreamRequest(logonUrl, {
+      method: "POST",
+      session: currentSession,
+      referer: `${loginBase.origin}/`,
+      contentType: "application/x-www-form-urlencoded",
+      body: form
+    });
+    updateSessionFromSetCookie(currentSession, logonUrl, postRes.setCookieList);
+    logs.push(`[SUBMIT] POST logon status=${postRes.statusCode}`);
 
-        console.log(`[API] Login Response Status: ${login.statusCode}`);
-        
-        // Handle Session Upgrade: If login returns a new cookie, we MUST use it
-        let activeCookie = cookie;
-        if (login.headers['set-cookie']) {
-            activeCookie = login.headers['set-cookie'][0].split(';')[0];
-            console.log(`[API] Session Upgraded: ${activeCookie}`);
-        }
-
-        // Step 2: Fetch Data from 9080
-        const fetchUrl = `${DATA_ROOT}/xskb/xskb_list.do?Ves632DSdyV=NEW_XSD_PYGL`;
-        console.log(`[API] Fetching Timetable from ${fetchUrl}`);
-        const timetable = await internalRequest(fetchUrl, {
-            headers: {
-                'Cookie': activeCookie,
-                'Referer': `${PORTAL_ROOT}/Logon.do?method=logon`,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        });
-
-        console.log(`[API] Timetable Fetch Status: ${timetable.statusCode} (${timetable.body.length} bytes)`);
-        
-        if (timetable.statusCode !== 200 && timetable.statusCode !== 302) {
-             console.error(`[API] Unexpected response body: ${timetable.body.toString('utf8').substring(0, 200)}`);
-        }
-
-        res.send(timetable.body);
-    } catch (err) {
-        console.error(`[API] Error during orchestration:`, err);
-        res.status(500).json({ error: err.message });
+    let currentUrl = logonUrl;
+    let redirects = 0;
+    while ([301, 302, 303, 307, 308].includes(postRes.statusCode) && redirects < 5) {
+      const location = postRes.location;
+      if (!location) break;
+      const nextUrl = normalizeRoutedUrl(new URL(location, currentUrl));
+      postRes = await upstreamRequest(nextUrl, { method: "GET", session: currentSession, referer: `${loginBase.origin}/` });
+      updateSessionFromSetCookie(currentSession, nextUrl, postRes.setCookieList);
+      currentUrl = nextUrl;
+      redirects += 1;
     }
+
+    // Map to 9080 if needed
+    const targetFetchUrl = getEffectivePort(currentUrl) === "9080" 
+        ? normalizeRoutedUrl(new URL(`${target.pathname}${target.search}`, currentUrl)) 
+        : target;
+
+    const targetRes = await upstreamRequest(targetFetchUrl, { method: "GET", session: currentSession, referer: currentUrl.toString() });
+
+    res.json({
+      html: Buffer.from(targetRes.bytes).toString('base64'), // Send as B64 to preserve GBK bytes for Rust
+      networkLogs: logs,
+      session: currentSession,
+      statusCode: targetRes.statusCode
+    });
+  } catch (e) {
+    res.status(502).json({ error: "submit_failed", details: String(e), networkLogs: logs });
+  }
 });
 
-// --- Legacy Proxy Mode ---
+// --- Legacy Universal Proxy ---
 app.all('/', async (req, res) => {
-    const targetParams = parseTargetParameters(req);
-    if (!targetParams.url) {
-        res.status(400).send("query parameter 'url' is required");
-        return;
-    }
+    // Treat everything right to url= as target
+    const urlMatch = req.url.match(/(?<=[?&])url=(?<url>.*)$/);
+    if (!urlMatch) return res.status(400).send("query parameter 'url' is required");
+    const targetReqUrl = new URL(decodeURIComponent(urlMatch.groups.url));
 
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
-
-    const targetReqUrl = targetParams.url;
-    const targetReqHandler = (targetRes) => {
-        console.log(`[Proxy] Response Status from Backend: ${targetRes.statusCode}`);
-        console.log(`[Proxy] Response Headers:`, targetRes.headers);
-        res.status(targetRes.statusCode)
-
-        const headersMap = new Map(Object.entries(targetRes.headersDistinct));
-        
-        // Rewrite Set-Cookie to remove Path/Domain restrictions
-        const setCookieHeaders = targetRes.headersDistinct['set-cookie'];
-        if (setCookieHeaders && setCookieHeaders.length > 0) {
-            console.log(`[Proxy] Outgoing Set-Cookie from Backend:`, setCookieHeaders);
-            const portSuffix = targetReqUrl.port ? `_${targetReqUrl.port}` : '';
-            const rewrittenCookies = setCookieHeaders.map(cookie => {
-                let rewritten = cookie
-                    .replace(/Path=[^;]+/i, 'Path=/')
-                    .replace(/Domain=[^;]+/i, '')
-                    .replace(/SameSite=[^;]+/i, '')
-                    .replace(/Secure/i, '')
-                    .replace(/;?\s*$/, ''); // Remove trailing semicolon/whitespace
-                
-                // Isolation: Rename JSESSIONID to include port if present
-                if (portSuffix) {
-                    rewritten = rewritten.replace(/JSESSIONID=/i, `JSESSIONID${portSuffix}=`);
-                }
-                
-                return rewritten + '; SameSite=None; Secure';
-            });
-            headersMap.set('set-cookie', rewrittenCookies);
-        }
-
-        // Set headers on the client response
-        for (const [name, value] of headersMap) {
-            res.setHeader(name, value);
-        }
-        // set CORS headers - Cleaned (handled by middleware)
-        
-        // remove CORP headers
-        res.removeHeader('cross-origin-resource-policy');
-        res.removeHeader('content-security-policy');
-        res.removeHeader('content-security-policy-report-only');
-        res.removeHeader('reporting-endpoints');
-        res.removeHeader('report-to');
-
-        targetRes.on('data', (chunk) => res.write(chunk));
-        targetRes.on('end', () => res.end());
-        targetRes.on('error', (err) => res.destroy(err));
-
-        // rewrite redirect location
-        if ([301, 302, 307, 308].includes(targetRes.statusCode)) {
-            const location = targetRes.headers.location;
-            if (location) {
-                try {
-                    const absoluteLocation = new URL(location, targetReqUrl).href;
-                    const proxyProtocol = req.headers['x-forwarded-proto'] || 'https';
-                    const proxyHost = req.headers.host;
-                    res.setHeader('location', `${proxyProtocol}://${proxyHost}/?url=${encodeURIComponent(absoluteLocation)}`);
-                } catch (e) {
-                    // fall back if URL parsing fails
-                }
-            }
-        }
-    };
-    console.log(`[Proxy] Incoming Request: ${req.method} ${targetReqUrl.href}`);
-    console.log(`[Proxy] Incoming Headers:`, req.headers);
-    if (req.body && req.body.length > 0) {
-        console.log(`[Proxy] Incoming Body Size: ${req.body.length} bytes`);
-        console.log(`[Proxy] Incoming Body Preview: ${req.body.toString('utf8').substring(0, 100)}`);
-    }
-
-    const targetReq = request(targetReqUrl, { method: req.method }, targetReqHandler);
-    
-    // Copy headers from the client request
-    const headers = new Map();
-    for (const [name, values] of Object.entries(req.headersDistinct)) {
-        if (name.startsWith('x-vercel-') || name === 'host') continue;
-        
-        // Join multi-value headers with semicolon for cookies, or comma for others
-        if (name === 'cookie') {
-            const portSuffix = targetReqUrl.port ? `_${targetReqUrl.port}` : '';
-            let joinedCookies = values.join('; ');
-            
-            // Isolation: Restore JSESSIONID from port-suffixed version
-            if (portSuffix && joinedCookies.includes(`JSESSIONID${portSuffix}`)) {
-                const regex = new RegExp(`JSESSIONID${portSuffix}=([^;]+)`, 'i');
-                const match = joinedCookies.match(regex);
-                if (match) {
-                    joinedCookies = `JSESSIONID=${match[1]}; ${joinedCookies}`;
-                }
-            }
-            
-            console.log(`[Proxy] Forwarding Cookies to Port ${targetReqUrl.port || '80'}:`, joinedCookies);
-            headers.set(name, joinedCookies);
-        } else {
-            headers.set(name, values.join(', '));
-        }
-    }
-    
-    // Spoofing: Host and Origin MUST match the backend to avoid security blocks
-    headers.set('host', targetReqUrl.host);
-    headers.set('origin', targetReqUrl.origin);
-
-    // Referer Injection: If client sent X-Alt-Referer, use it as the real Referer for the target
-    const altReferer = headers.get('x-alt-referer');
-    if (altReferer) {
-        headers.set('referer', altReferer);
-        headers.delete('x-alt-referer');
-    }
-    
-    // Set headers on the target request
-    for (const [name, value] of headers) {
-        targetReq.setHeader(name, value);
-    }
-    if (req.body && req.body?.length > 0) {
-        targetReq.write(req.body);
-    }
-    targetReq.on('error', (err) => {
-        res.status(500).json({ error: "Proxy error", details: err.message });
+    const response = await fetch(targetReqUrl.toString(), {
+        method: req.method,
+        headers: {
+            ...req.headers,
+            host: targetReqUrl.host,
+            origin: targetReqUrl.origin,
+            referer: req.headers['x-alt-referer'] || req.headers.referer
+        },
+        body: (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined,
+        redirect: 'manual'
     });
-    targetReq.end();
+
+    res.status(response.status);
+    response.headers.forEach((v, k) => res.setHeader(k, v));
+    const body = await response.arrayBuffer();
+    res.send(Buffer.from(body));
 });
-
-function request(url, options = {}, callback) {
-    const httpModule = url.protocol === 'https:' ? https : http;
-    return httpModule.request(url, options, callback);
-}
-
-function parseTargetParameters(proxyRequest) {
-    const params = {}
-    // url - treat everything right to url= query parameter as target url value
-    const urlMatch = proxyRequest.url.match(/(?<=[?&])url=(?<url>.*)$/);
-    if (urlMatch) {
-        params.url = new URL(decodeURIComponent(urlMatch.groups.url));
-    }
-
-    return params;
-}
 
 export default app;
