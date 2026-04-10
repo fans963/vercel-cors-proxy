@@ -13,6 +13,8 @@ app.all('/', async (req, res) => {
 
     const targetReqUrl = targetParams.url;
     const targetReqHandler = (targetRes) => {
+        console.log(`[Proxy] Response Status from Backend: ${targetRes.statusCode}`);
+        console.log(`[Proxy] Response Headers:`, targetRes.headers);
         res.status(targetRes.statusCode)
 
         const headersMap = new Map(Object.entries(targetRes.headersDistinct));
