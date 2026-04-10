@@ -18,16 +18,21 @@ app.all('/', async (req, res) => {
         const headersMap = new Map(Object.entries(targetRes.headersDistinct));
         
         // Rewrite Set-Cookie to remove Path/Domain restrictions
-        if (headersMap.has('set-cookie')) {
-            const cookies = headersMap.get('set-cookie').map(cookie => {
+        const setCookieHeaders = targetRes.headersDistinct['set-cookie'];
+        if (setCookieHeaders && setCookieHeaders.length > 0) {
+            console.log(`[Proxy] Outgoing Set-Cookie from Backend:`, setCookieHeaders);
+            const rewrittenCookies = setCookieHeaders.map(cookie => {
                 return cookie
                     .replace(/Path=[^;]+/i, 'Path=/')
                     .replace(/Domain=[^;]+/i, '');
             });
-            headersMap.set('set-cookie', cookies);
+            headersMap.set('set-cookie', rewrittenCookies);
         }
 
-        res.setHeaders(headersMap);
+        // Set headers on the client response
+        for (const [name, value] of headersMap) {
+            res.setHeader(name, value);
+        }
         // set CORS headers
         const origin = req.headers.origin || '*';
         res.setHeader('access-control-allow-origin', origin);
@@ -64,8 +69,19 @@ app.all('/', async (req, res) => {
     const targetReq = request(targetReqUrl, { method: req.method }, targetReqHandler);
     
     // Copy headers from the client request
-    const headers = new Map(Object.entries(req.headersDistinct)
-        .filter(([name]) => !name.startsWith('x-vercel-') && name !== 'host'));
+    const headers = new Map();
+    for (const [name, values] of Object.entries(req.headersDistinct)) {
+        if (name.startsWith('x-vercel-') || name === 'host') continue;
+        
+        // Join multi-value headers with semicolon for cookies, or comma for others
+        if (name === 'cookie') {
+            const joinedCookies = values.join('; ');
+            console.log(`[Proxy] Incoming Cookies from Browser:`, joinedCookies);
+            headers.set(name, joinedCookies);
+        } else {
+            headers.set(name, values.join(', '));
+        }
+    }
     
     // Referer Injection: If client sent X-Alt-Referer, use it as the real Referer for the target
     const altReferer = headers.get('x-alt-referer');
@@ -74,7 +90,10 @@ app.all('/', async (req, res) => {
         headers.delete('x-alt-referer');
     }
     
-    targetReq.setHeaders(headers);
+    // Set headers on the target request
+    for (const [name, value] of headers) {
+        targetReq.setHeader(name, value);
+    }
     targetReq.setHeader('host', targetReqUrl.host);
     if (req.body && req.body?.length > 0) {
         targetReq.write(req.body);
