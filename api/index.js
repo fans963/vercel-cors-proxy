@@ -6,6 +6,20 @@ const app = express();
 app.use(express.json()); // support json bodies for APIs
 app.use(express.raw({ type: '*/*', limit: '1mb' })); // ensure body is a buffer for proxy
 
+// Global CORS Middleware
+app.use((req, res, next) => {
+    const origin = req.headers.origin || '*';
+    res.setHeader('access-control-allow-origin', origin);
+    res.setHeader('access-control-allow-credentials', 'true');
+    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('access-control-allow-headers', req.headers['access-control-request-headers'] || '*');
+    
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    next();
+});
+
 // --- Server-Side Orchestration APIs ---
 
 const PORTAL_ROOT = "http://202.119.81.112:8080";
@@ -104,11 +118,6 @@ app.all('/', async (req, res) => {
     }
 
     if (req.method === 'OPTIONS') {
-        const origin = req.headers.origin || '*';
-        res.setHeader('access-control-allow-origin', origin);
-        res.setHeader('access-control-allow-credentials', 'true');
-        res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-        res.setHeader('access-control-allow-headers', req.headers['access-control-request-headers'] || '*');
         return res.status(200).end();
     }
 
@@ -147,12 +156,7 @@ app.all('/', async (req, res) => {
         for (const [name, value] of headersMap) {
             res.setHeader(name, value);
         }
-        // set CORS headers
-        const origin = req.headers.origin || '*';
-        res.setHeader('access-control-allow-origin', origin);
-        res.setHeader('access-control-allow-credentials', 'true');
-        res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-        res.setHeader('access-control-allow-headers', req.headers['access-control-request-headers'] || '*');
+        // set CORS headers - Cleaned (handled by middleware)
         
         // remove CORP headers
         res.removeHeader('cross-origin-resource-policy');
