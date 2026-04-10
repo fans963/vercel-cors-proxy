@@ -61,9 +61,20 @@ app.all('/', async (req, res) => {
             }
         }
     };
-    const targetReq = request(targetReqUrl, {method: req.method}, targetReqHandler);
-    targetReq.setHeaders(new Map(Object.entries(req.headersDistinct)
-        .filter(([name]) => !name.startsWith('x-vercel-'))));
+    const targetReq = request(targetReqUrl, { method: req.method }, targetReqHandler);
+    
+    // Copy headers from the client request
+    const headers = new Map(Object.entries(req.headersDistinct)
+        .filter(([name]) => !name.startsWith('x-vercel-') && name !== 'host'));
+    
+    // Referer Injection: If client sent X-Alt-Referer, use it as the real Referer for the target
+    const altReferer = headers.get('x-alt-referer');
+    if (altReferer) {
+        headers.set('referer', altReferer);
+        headers.delete('x-alt-referer');
+    }
+    
+    targetReq.setHeaders(headers);
     targetReq.setHeader('host', targetReqUrl.host);
     if (req.body && req.body?.length > 0) {
         targetReq.write(req.body);
