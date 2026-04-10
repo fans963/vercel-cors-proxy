@@ -26,7 +26,11 @@ app.all('/', async (req, res) => {
             const rewrittenCookies = setCookieHeaders.map(cookie => {
                 return cookie
                     .replace(/Path=[^;]+/i, 'Path=/')
-                    .replace(/Domain=[^;]+/i, '');
+                    .replace(/Domain=[^;]+/i, '')
+                    .replace(/SameSite=[^;]+/i, '')
+                    .replace(/Secure/i, '')
+                    .replace(/;?\s*$/, '') // Remove trailing semicolon/whitespace
+                    + '; SameSite=None; Secure';
             });
             headersMap.set('set-cookie', rewrittenCookies);
         }
