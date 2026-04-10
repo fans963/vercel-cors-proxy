@@ -66,6 +66,13 @@ app.all('/', async (req, res) => {
             }
         }
     };
+    console.log(`[Proxy] Incoming Request: ${req.method} ${targetReqUrl.href}`);
+    console.log(`[Proxy] Incoming Headers:`, req.headers);
+    if (req.body && req.body.length > 0) {
+        console.log(`[Proxy] Incoming Body Size: ${req.body.length} bytes`);
+        console.log(`[Proxy] Incoming Body Preview: ${req.body.toString('utf8').substring(0, 100)}`);
+    }
+
     const targetReq = request(targetReqUrl, { method: req.method }, targetReqHandler);
     
     // Copy headers from the client request
@@ -76,13 +83,17 @@ app.all('/', async (req, res) => {
         // Join multi-value headers with semicolon for cookies, or comma for others
         if (name === 'cookie') {
             const joinedCookies = values.join('; ');
-            console.log(`[Proxy] Incoming Cookies from Browser:`, joinedCookies);
+            console.log(`[Proxy] Forwarding Cookies:`, joinedCookies);
             headers.set(name, joinedCookies);
         } else {
             headers.set(name, values.join(', '));
         }
     }
     
+    // Spoofing: Host and Origin MUST match the backend to avoid security blocks
+    headers.set('host', targetReqUrl.host);
+    headers.set('origin', targetReqUrl.origin);
+
     // Referer Injection: If client sent X-Alt-Referer, use it as the real Referer for the target
     const altReferer = headers.get('x-alt-referer');
     if (altReferer) {
@@ -94,7 +105,6 @@ app.all('/', async (req, res) => {
     for (const [name, value] of headers) {
         targetReq.setHeader(name, value);
     }
-    targetReq.setHeader('host', targetReqUrl.host);
     if (req.body && req.body?.length > 0) {
         targetReq.write(req.body);
     }
