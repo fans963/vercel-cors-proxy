@@ -73,7 +73,7 @@ app.get('/api/captcha', async (req, res) => {
 app.post('/api/timetable', async (req, res) => {
     try {
         const { username, password, captcha, cookie } = req.body;
-        console.log(`[API] Orchestrating login for ${username} using cookie ${cookie}`);
+        console.log(`[API] Orchestrating login for ${username}`);
 
         // Step 1: Login POST
         const body = new URLSearchParams({
@@ -89,22 +89,41 @@ app.post('/api/timetable', async (req, res) => {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Cookie': cookie,
-                'Referer': `${PORTAL_ROOT}/Logon.do?method=logonurl`
+                'Referer': `${PORTAL_ROOT}/Logon.do?method=logonurl`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             },
             body: body
         });
 
+        console.log(`[API] Login Response Status: ${login.statusCode}`);
+        
+        // Handle Session Upgrade: If login returns a new cookie, we MUST use it
+        let activeCookie = cookie;
+        if (login.headers['set-cookie']) {
+            activeCookie = login.headers['set-cookie'][0].split(';')[0];
+            console.log(`[API] Session Upgraded: ${activeCookie}`);
+        }
+
         // Step 2: Fetch Data from 9080
-        const timetable = await internalRequest(`${DATA_ROOT}/xskb/xskb_list.do?Ves632DSdyV=NEW_XSD_PYGL`, {
+        const fetchUrl = `${DATA_ROOT}/xskb/xskb_list.do?Ves632DSdyV=NEW_XSD_PYGL`;
+        console.log(`[API] Fetching Timetable from ${fetchUrl}`);
+        const timetable = await internalRequest(fetchUrl, {
             headers: {
-                'Cookie': cookie,
-                'Referer': `${PORTAL_ROOT}/Logon.do?method=logonurl`
+                'Cookie': activeCookie,
+                'Referer': `${PORTAL_ROOT}/Logon.do?method=logon`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
 
-        // Provide raw body to Rust for decoding/parsing
+        console.log(`[API] Timetable Fetch Status: ${timetable.statusCode} (${timetable.body.length} bytes)`);
+        
+        if (timetable.statusCode !== 200 && timetable.statusCode !== 302) {
+             console.error(`[API] Unexpected response body: ${timetable.body.toString('utf8').substring(0, 200)}`);
+        }
+
         res.send(timetable.body);
     } catch (err) {
+        console.error(`[API] Error during orchestration:`, err);
         res.status(500).json({ error: err.message });
     }
 });
