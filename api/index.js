@@ -3,7 +3,99 @@ import * as http from "node:http";
 import * as https from "node:https";
 
 const app = express();
-app.use(express.raw({ type: '*/*' })); // ensure body is a buffer
+app.use(express.json()); // support json bodies for APIs
+app.use(express.raw({ type: '*/*', limit: '1mb' })); // ensure body is a buffer for proxy
+
+// --- Server-Side Orchestration APIs ---
+
+const PORTAL_ROOT = "http://202.119.81.112:8080";
+const DATA_ROOT = "http://202.119.81.112:9080/njlgdx";
+
+// Helper for server-side requests
+async function internalRequest(url, options = {}) {
+    return new Promise((resolve, reject) => {
+        const u = new URL(url);
+        const mod = u.protocol === 'https:' ? https : http;
+        const req = mod.request(u, options, (res) => {
+            const chunks = [];
+            res.on('data', (c) => chunks.push(c));
+            res.on('end', () => {
+                resolve({
+                    statusCode: res.statusCode,
+                    headers: res.headers,
+                    body: Buffer.concat(chunks)
+                });
+            });
+        });
+        req.on('error', reject);
+        if (options.body) req.write(options.body);
+        req.end();
+    });
+}
+
+// 1. Captcha API: Fetches captcha and the initial JSESSIONID
+app.get('/api/captcha', async (req, res) => {
+    try {
+        console.log(`[API] Fetching Captcha from ${PORTAL_ROOT}`);
+        // Init session
+        const init = await internalRequest(`${PORTAL_ROOT}/Logon.do?method=logonurl`);
+        const sessionCookie = init.headers['set-cookie'] ? init.headers['set-cookie'][0].split(';')[0] : '';
+
+        // Get captcha
+        const captcha = await internalRequest(`${PORTAL_ROOT}/verifycode.servlet`, {
+            headers: { 'Cookie': sessionCookie }
+        });
+
+        res.json({
+            image: captcha.body.toString('base64'),
+            cookie: sessionCookie
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 2. Timetable API: Handles full Login -> Fetch flow on the server
+app.post('/api/timetable', async (req, res) => {
+    try {
+        const { username, password, captcha, cookie } = req.body;
+        console.log(`[API] Orchestrating login for ${username} using cookie ${cookie}`);
+
+        // Step 1: Login POST
+        const body = new URLSearchParams({
+            USERNAME: username,
+            PASSWORD: password,
+            useDogCode: '',
+            RANDOMCODE: captcha,
+            encoded: ''
+        }).toString();
+
+        const login = await internalRequest(`${PORTAL_ROOT}/Logon.do?method=logon`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': cookie,
+                'Referer': `${PORTAL_ROOT}/Logon.do?method=logonurl`
+            },
+            body: body
+        });
+
+        // Step 2: Fetch Data from 9080
+        const timetable = await internalRequest(`${DATA_ROOT}/xskb/xskb_list.do?Ves632DSdyV=NEW_XSD_PYGL`, {
+            headers: {
+                'Cookie': cookie,
+                'Referer': `${PORTAL_ROOT}/Logon.do?method=logonurl`
+            }
+        });
+
+        // Provide raw body to Rust for decoding/parsing
+        res.send(timetable.body);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Legacy Proxy Mode ---
 app.all('/', async (req, res) => {
     const targetParams = parseTargetParameters(req);
     if (!targetParams.url) {
